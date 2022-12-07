@@ -1,6 +1,7 @@
 package lzsgo
 
 import (
+	"errors"
 	"sync"
 	"unsafe"
 )
@@ -9,6 +10,11 @@ const (
 	htSize = 65536
 	EINVAL = 22
 	EFBIG  = 27
+
+	ErrEFBIG   = "content too large"
+	ErrEINVAL  = "invalid argument"
+	ErrZero    = "result length is zero"
+	ErrUnknown = "unknown error"
 )
 
 type Compressor struct {
@@ -29,19 +35,40 @@ func (c *Compressor) set(h uint16, si uint16) {
 }
 
 func (c *Compressor) reset() {
+	// c.table = [htSize]uint16{}
 	c.inUse = [htSize / 32]uint32{}
 }
 
 var compressorPool = sync.Pool{New: func() interface{} { return new(Compressor) }}
 
-func Compress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
+func Compress(src []byte, dst []byte) (int, error) {
 	c := compressorPool.Get().(*Compressor)
-	n := c.Compress(dst, dstlen, src, srclen)
+	n := int(c.lzsCompress(&dst[0], int32(cap(dst)), &src[0], int32(len(src))))
 	compressorPool.Put(c)
-	return n
+	return n, parseErr(n)
 }
 
-func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
+func Uncompress(src []byte, dst []byte) (int, error) {
+	n := int(lzsDecompress(&dst[0], int32(cap(dst)), &src[0], int32(len(src))))
+	return n, parseErr(n)
+}
+
+func parseErr(n int) error {
+	switch {
+	case n > 0:
+		return nil
+	case n == -EFBIG:
+		return errors.New(ErrEFBIG)
+	case n == -EINVAL:
+		return errors.New(ErrEINVAL)
+	case n == 0:
+		return errors.New(ErrZero)
+	default:
+		return errors.New(ErrUnknown)
+	}
+}
+
+func (c *Compressor) lzsCompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 	var length int32
 	var offset int32
 	var inpos int32 = 0
@@ -53,6 +80,7 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 	var outbits uint32 = 0
 	var nr_outbits int32 = 0
 	var hash_chain [2048]uint16
+	var vv int32
 	if srclen > htSize {
 		return -EFBIG
 	}
@@ -72,24 +100,18 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 				if outpos == dstlen {
 					return -EFBIG
 				}
-				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-					_cgo_addr := &outpos
-					_cgo_ret = *_cgo_addr
-					*_cgo_addr++
-					return
-				}()))) = uint8(outbits >> nr_outbits)
+				vv = outpos
+				outpos++
+				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 			}
 			if nr_outbits >= 8 {
 				nr_outbits -= 8
 				if outpos == dstlen {
 					return -EFBIG
 				}
-				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-					_cgo_addr := &outpos
-					_cgo_ret = *_cgo_addr
-					*_cgo_addr++
-					return
-				}()))) = uint8(outbits >> nr_outbits)
+				vv = outpos
+				outpos++
+				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 			}
 			inpos++
 			continue
@@ -124,23 +146,18 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 			if outpos == dstlen {
 				return -EFBIG
 			}
-			*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-				_cgo_addr := &outpos
-				_cgo_ret = *_cgo_addr
-				*_cgo_addr++
-				return
-			}()))) = uint8(outbits >> nr_outbits)
+			vv = outpos
+			outpos++
+			*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
+
 			if nr_outbits >= 8 {
 				nr_outbits -= 8
 				if outpos == dstlen {
 					return -EFBIG
 				}
-				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-					_cgo_addr := &outpos
-					_cgo_ret = *_cgo_addr
-					*_cgo_addr++
-					return
-				}()))) = uint8(outbits >> nr_outbits)
+				vv = outpos
+				outpos++
+				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 			}
 		} else {
 			outbits <<= 13
@@ -150,23 +167,17 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 			if outpos == dstlen {
 				return -EFBIG
 			}
-			*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-				_cgo_addr := &outpos
-				_cgo_ret = *_cgo_addr
-				*_cgo_addr++
-				return
-			}()))) = uint8(outbits >> nr_outbits)
+			vv = outpos
+			outpos++
+			*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 			if nr_outbits >= 8 {
 				nr_outbits -= 8
 				if outpos == dstlen {
 					return -EFBIG
 				}
-				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-					_cgo_addr := &outpos
-					_cgo_ret = *_cgo_addr
-					*_cgo_addr++
-					return
-				}()))) = uint8(outbits >> nr_outbits)
+				vv = outpos
+				outpos++
+				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 			}
 		}
 		if length < 5 {
@@ -178,24 +189,18 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 				if outpos == dstlen {
 					return -EFBIG
 				}
-				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-					_cgo_addr := &outpos
-					_cgo_ret = *_cgo_addr
-					*_cgo_addr++
-					return
-				}()))) = uint8(outbits >> nr_outbits)
+				vv = outpos
+				outpos++
+				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 			}
 			if nr_outbits >= 8 {
 				nr_outbits -= 8
 				if outpos == dstlen {
 					return -EFBIG
 				}
-				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-					_cgo_addr := &outpos
-					_cgo_ret = *_cgo_addr
-					*_cgo_addr++
-					return
-				}()))) = uint8(outbits >> nr_outbits)
+				vv = outpos
+				outpos++
+				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 			}
 		} else if length < 8 {
 			outbits <<= 4
@@ -206,24 +211,18 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 				if outpos == dstlen {
 					return -EFBIG
 				}
-				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-					_cgo_addr := &outpos
-					_cgo_ret = *_cgo_addr
-					*_cgo_addr++
-					return
-				}()))) = uint8(outbits >> nr_outbits)
+				vv = outpos
+				outpos++
+				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 			}
 			if nr_outbits >= 8 {
 				nr_outbits -= 8
 				if outpos == dstlen {
 					return -EFBIG
 				}
-				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-					_cgo_addr := &outpos
-					_cgo_ret = *_cgo_addr
-					*_cgo_addr++
-					return
-				}()))) = uint8(outbits >> nr_outbits)
+				vv = outpos
+				outpos++
+				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 			}
 		} else {
 			length += 7
@@ -236,24 +235,18 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 				}
 				if nr_outbits >= 8 {
 					nr_outbits -= 8
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 				}
 				length -= 30
 			}
@@ -266,24 +259,18 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 				}
 				if nr_outbits >= 8 {
 					nr_outbits -= 8
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 				}
 			} else {
 				outbits <<= 4
@@ -294,24 +281,18 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 				}
 				if nr_outbits >= 8 {
 					nr_outbits -= 8
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 				}
 			}
 		}
@@ -350,23 +331,17 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 					if nr_outbits >= 8 {
 						nr_outbits -= 8
 						if outpos == dstlen {
 							return -EFBIG
 						}
-						*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-							_cgo_addr := &outpos
-							_cgo_ret = *_cgo_addr
-							*_cgo_addr++
-							return
-						}()))) = uint8(outbits >> nr_outbits)
+						vv = outpos
+						outpos++
+						*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 					}
 				}
 			} else {
@@ -378,23 +353,17 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 					if nr_outbits >= 8 {
 						nr_outbits -= 8
 						if outpos == dstlen {
 							return -EFBIG
 						}
-						*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-							_cgo_addr := &outpos
-							_cgo_ret = *_cgo_addr
-							*_cgo_addr++
-							return
-						}()))) = uint8(outbits >> nr_outbits)
+						vv = outpos
+						outpos++
+						*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 					}
 				}
 			}
@@ -407,24 +376,18 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 				}
 				if nr_outbits >= 8 {
 					nr_outbits -= 8
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 				}
 			}
 		} else {
@@ -437,24 +400,18 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 				if outpos == dstlen {
 					return -EFBIG
 				}
-				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-					_cgo_addr := &outpos
-					_cgo_ret = *_cgo_addr
-					*_cgo_addr++
-					return
-				}()))) = uint8(outbits >> nr_outbits)
+				vv = outpos
+				outpos++
+				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 
 				if nr_outbits >= 8 {
 					nr_outbits -= 8
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 				}
 			}
 			{
@@ -465,23 +422,17 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 				if outpos == dstlen {
 					return -EFBIG
 				}
-				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-					_cgo_addr := &outpos
-					_cgo_ret = *_cgo_addr
-					*_cgo_addr++
-					return
-				}()))) = uint8(outbits >> nr_outbits)
+				vv = outpos
+				outpos++
+				*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 				if nr_outbits >= 8 {
 					nr_outbits -= 8
 					if outpos == dstlen {
 						return -EFBIG
 					}
-					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-						_cgo_addr := &outpos
-						_cgo_ret = *_cgo_addr
-						*_cgo_addr++
-						return
-					}()))) = uint8(outbits >> nr_outbits)
+					vv = outpos
+					outpos++
+					*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 				}
 			}
 		}
@@ -494,24 +445,18 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 		if outpos == dstlen {
 			return -EFBIG
 		}
-		*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-			_cgo_addr := &outpos
-			_cgo_ret = *_cgo_addr
-			*_cgo_addr++
-			return
-		}()))) = uint8(outbits >> nr_outbits)
+		vv = outpos
+		outpos++
+		*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 
 		if nr_outbits >= 8 {
 			nr_outbits -= 8
 			if outpos == dstlen {
 				return -EFBIG
 			}
-			*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-				_cgo_addr := &outpos
-				_cgo_ret = *_cgo_addr
-				*_cgo_addr++
-				return
-			}()))) = uint8(outbits >> nr_outbits)
+			vv = outpos
+			outpos++
+			*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 		}
 	}
 
@@ -523,30 +468,24 @@ func (c *Compressor) Compress(dst *uint8, dstlen int32, src *uint8, srclen int32
 		if outpos == dstlen {
 			return -EFBIG
 		}
-		*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-			_cgo_addr := &outpos
-			_cgo_ret = *_cgo_addr
-			*_cgo_addr++
-			return
-		}()))) = uint8(outbits >> nr_outbits)
+		vv = outpos
+		outpos++
+		*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 	}
 	if nr_outbits >= 8 {
 		nr_outbits -= 8
 		if outpos == dstlen {
 			return -EFBIG
 		}
-		*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-			_cgo_addr := &outpos
-			_cgo_ret = *_cgo_addr
-			*_cgo_addr++
-			return
-		}()))) = uint8(outbits >> nr_outbits)
+		vv = outpos
+		outpos++
+		*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(outbits >> nr_outbits)
 	}
 
 	return outpos
 }
 
-func Uncompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
+func lzsDecompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 	var outlen int32 = 0
 	var bits_left int32 = 8
 	var data uint32
@@ -579,12 +518,10 @@ func Uncompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 			if outlen == dstlen {
 				return -EFBIG
 			}
-			*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(func() (_cgo_ret int32) {
-				_cgo_addr := &outlen
-				_cgo_ret = *_cgo_addr
-				*_cgo_addr++
-				return
-			}()))) = uint8(data)
+
+			vv := outlen
+			outlen++
+			*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(dst)) + uintptr(vv))) = uint8(data)
 			{
 				if srclen < 2 {
 					return -EINVAL

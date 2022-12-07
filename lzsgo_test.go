@@ -15,37 +15,48 @@ func TestLZSGo(t *testing.T) {
 	for i := 1; i < MaxMTU; i++ {
 		pkgBuf := randBytes(i)
 		comprBuf := make([]byte, PkgSize)
-		ret := int(Compress(&comprBuf[0], PkgSize, &pkgBuf[0], int32(i)))
+		ret, _ := Compress(pkgBuf, comprBuf)
 		if ret <= 0 {
 			t.Errorf("Compress failed: %d %d", ret, i)
 		}
 		unprBuf := make([]byte, i)
-		ret = int(Uncompress(&unprBuf[0], PkgSize, &comprBuf[0], int32(ret)))
+		ret, _ = Uncompress(comprBuf, unprBuf)
 		if ret <= 0 {
 			t.Errorf("Uncompress failed: %d %d", ret, i)
 		}
 		if !bytes.Equal(pkgBuf[:i], unprBuf[:ret]) {
-			t.Errorf("Uncompress failed: %d %d", i, ret)
+			t.Errorf("Compress and uncompress data not equal")
 		}
 	}
 }
 
 func BenchmarkCompress(b *testing.B) {
 	buf := randBytes(1500)
-	comprBuf := make([]byte, len(buf))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Compress(&comprBuf[0], int32(len(comprBuf)), &buf[0], int32(len(buf)))
+		comprBuf := make([]byte, PkgSize)
+		Compress(buf, comprBuf)
 	}
+}
+
+func BenchmarkParallelCompress(b *testing.B) {
+	buf := randBytes(1500)
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			comprBuf := make([]byte, PkgSize)
+			Compress(buf, comprBuf)
+		}
+	})
 }
 
 func BenchmarkUncompress(b *testing.B) {
 	buf := randBytes(1500)
 	comprBuf := make([]byte, len(buf))
-	Compress(&comprBuf[0], int32(len(comprBuf)), &buf[0], int32(len(buf)))
+	Compress(buf, comprBuf)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Uncompress(&buf[0], int32(len(buf)), &comprBuf[0], int32(len(comprBuf)))
+		Uncompress(comprBuf, buf)
 	}
 }
 
