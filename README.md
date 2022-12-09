@@ -53,6 +53,10 @@ func main() {
 
 # Benchmarks
 cpu: Intel(R) Xeon(R) CPU E5-2603 v4 @ 1.70GHz
+1. [Lzsc](https://github.com/lanrenwo/lzsc): LZS CGO Version
+2. [Lz4](https://github.com/pierrec/lz4): LZ4 compression and decompression in pure Go
+3. [Lzsgo](https://github.com/lanrenwo/lzsgo)：LZS pure Go Version
+
 | **No.** | **Lzsc (µs)** | **Lz4 (µs)** | **Lzsgo (µs)** |
 |---------|---------------|--------------|----------------|
 | 1       | 16.259        | 21.271       | 37.199         |
