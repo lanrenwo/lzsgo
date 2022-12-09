@@ -15,14 +15,14 @@ func TestLZSGo(t *testing.T) {
 	for i := 1; i < MaxMTU; i++ {
 		pkgBuf := randBytes(i)
 		comprBuf := make([]byte, PkgSize)
-		ret, _ := Compress(pkgBuf, comprBuf)
-		if ret <= 0 {
-			t.Errorf("Compress failed: %d %d", ret, i)
+		ret, err := Compress(pkgBuf, comprBuf)
+		if err != nil {
+			t.Errorf("Compress failed: %d %d %s", ret, i, err)
 		}
 		unprBuf := make([]byte, i)
-		ret, _ = Uncompress(comprBuf, unprBuf)
-		if ret <= 0 {
-			t.Errorf("Uncompress failed: %d %d", ret, i)
+		ret, err2 := Uncompress(comprBuf, unprBuf)
+		if err2 != nil {
+			t.Errorf("Uncompress failed: %d %d %s", ret, i, err2)
 		}
 		if !bytes.Equal(pkgBuf[:i], unprBuf[:ret]) {
 			t.Errorf("Compress and uncompress data not equal")
