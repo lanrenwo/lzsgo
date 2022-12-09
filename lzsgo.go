@@ -2,7 +2,6 @@ package lzsgo
 
 import (
 	"errors"
-	"sync"
 	"unsafe"
 )
 
@@ -17,34 +16,16 @@ const (
 	ErrUnknown = "unknown error"
 )
 
-type Compressor struct {
-	table [htSize]uint16
-	inUse [htSize / 32]uint32
-}
+var HashTable [htSize]uint16
 
-func (c *Compressor) get(h uint16) uint16 {
-	if c.inUse[h/32]&(1<<(h%32)) != 0 {
-		return c.table[h]
+func init() {
+	for i := 0; i < htSize; i++ {
+		HashTable[i] = 65535
 	}
-	return 65535
 }
-
-func (c *Compressor) set(h uint16, si uint16) {
-	c.table[h] = si
-	c.inUse[h/32] |= 1 << (h % 32)
-}
-
-func (c *Compressor) reset() {
-	// c.table = [htSize]uint16{}
-	c.inUse = [htSize / 32]uint32{}
-}
-
-var compressorPool = sync.Pool{New: func() interface{} { return new(Compressor) }}
 
 func Compress(src []byte, dst []byte) (int, error) {
-	c := compressorPool.Get().(*Compressor)
-	n := int(c.lzsCompress(&dst[0], int32(cap(dst)), &src[0], int32(len(src))))
-	compressorPool.Put(c)
+	n := int(lzsCompress(&dst[0], int32(cap(dst)), &src[0], int32(len(src))))
 	return n, parseErr(n)
 }
 
@@ -68,7 +49,7 @@ func parseErr(n int) error {
 	}
 }
 
-func (c *Compressor) lzsCompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
+func lzsCompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 	var length int32
 	var offset int32
 	var inpos int32 = 0
@@ -79,18 +60,18 @@ func (c *Compressor) lzsCompress(dst *uint8, dstlen int32, src *uint8, srclen in
 	var hash uint16
 	var outbits uint32 = 0
 	var nr_outbits int32 = 0
+	var hash_table [htSize]uint16 = HashTable
 	var hash_chain [2048]uint16
 	var vv int32
 	if srclen > htSize {
 		return -EFBIG
 	}
-	c.reset()
 
 	for inpos < srclen-2 {
 		hash = *(*uint16)(unsafe.Pointer((*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(src)) + uintptr(inpos)))))
-		hofs = c.get(hash)
+		hofs = hash_table[hash]
 		hash_chain[inpos&2047] = hofs
-		c.set(hash, uint16(inpos))
+		hash_table[hash] = uint16(inpos)
 		if int32(hofs) == 65535 || int32(hofs)+2048 <= inpos {
 			outbits <<= 9
 			outbits |= uint32(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(src)) + uintptr(inpos))))
@@ -307,19 +288,21 @@ func (c *Compressor) lzsCompress(dst *uint8, dstlen int32, src *uint8, srclen in
 			return *_cgo_addr
 		}() != 0 {
 			hash = *(*uint16)(unsafe.Pointer((*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(src)) + uintptr(inpos)))))
-			hash_chain[inpos&2047] = c.get(hash)
-			c.set(hash, uint16(func() (_cgo_ret int32) {
+			hash_chain[inpos&2047] = hash_table[hash]
+			hash_table[hash] = uint16(func() (_cgo_ret int32) {
 				_cgo_addr := &inpos
 				_cgo_ret = *_cgo_addr
 				*_cgo_addr++
 				return
-			}()))
+			}())
 		}
 	}
 
 	if inpos == srclen-2 {
 		hash = *(*uint16)(unsafe.Pointer((*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(src)) + uintptr(inpos)))))
-		hofs = c.get(hash)
+		// hofs = c.get(hash)
+		// hofs = hash_table[hash]
+		hofs = hash_table[hash]
 		if int32(hofs) != 65535 && int32(hofs)+2048 > inpos {
 			offset = inpos - int32(hofs)
 			if offset < 128 {
