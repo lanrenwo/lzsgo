@@ -101,7 +101,7 @@ func lzsCompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 		longest_match_len = 2
 		longest_match_ofs = hofs
 		for ; int32(hofs) != 65535 && int32(hofs)+2048 > inpos; hofs = hash_chain[hofs&2047] {
-			if !(memcmp(uintptr(unsafe.Pointer(src))+uintptr(hofs+2), uintptr(unsafe.Pointer(src))+uintptr(inpos+2), uint64(int32(longest_match_len-1))) != 0) {
+			if !(memcmp(unsafe.Pointer(uintptr(unsafe.Pointer(src))+uintptr(hofs+2)), unsafe.Pointer(uintptr(unsafe.Pointer(src))+uintptr(inpos+2)), uintptr(longest_match_len-1)) != 0) {
 				longest_match_ofs = hofs
 				for {
 					longest_match_len++
@@ -654,17 +654,13 @@ func lzsDecompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 	return -EINVAL
 }
 
-func memcmp(s1, s2 uintptr, n uint64) int32 {
-	for ; n != 0; n-- {
-		c1 := *(*byte)(unsafe.Pointer(s1))
-		s1++
-		c2 := *(*byte)(unsafe.Pointer(s2))
-		s2++
-		if c1 < c2 {
+func memcmp(s1, s2 unsafe.Pointer, n uintptr) int {
+	p1 := (*[1 << 30]byte)(s1)[:n:n]
+	p2 := (*[1 << 30]byte)(s2)[:n:n]
+	for i := 0; i < len(p1); i++ {
+		if p1[i] < p2[i] {
 			return -1
-		}
-
-		if c1 > c2 {
+		} else if p1[i] > p2[i] {
 			return 1
 		}
 	}
