@@ -1,4 +1,7 @@
 # lzsgo
+[![Go](https://github.com/lanrenwo/lzsgo/workflows/Go/badge.svg)](https://github.com/lanrenwo/lzsgo/actions)
+[![codecov](https://codecov.io/gh/lanrenwo/lzsgo/branch/main/graph/badge.svg)](https://codecov.io/gh/lanrenwo/lzsgo)
+
 lzsgo, using c2go, converts OpenConnect's LZS library, pure golang code, good performance.
 
 # Installation
