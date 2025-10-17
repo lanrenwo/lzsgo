@@ -2,6 +2,7 @@ package lzsgo
 
 import (
 	"errors"
+	"math/bits"
 	"sync"
 	"unsafe"
 )
@@ -17,9 +18,14 @@ const (
 	ErrUnknown = "unknown error"
 )
 
+type hashTable struct {
+	entries    [htSize]uint32
+	generation uint32
+}
+
 var hashTablePool = sync.Pool{
 	New: func() interface{} {
-		return new([htSize]uint16)
+		return &hashTable{}
 	},
 }
 
@@ -49,13 +55,13 @@ func parseErr(n int) error {
 }
 
 func lzsCompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
-	hash_table := hashTablePool.Get().(*[htSize]uint16)
-	result := lzsCompressCore(dst, dstlen, src, srclen, hash_table)
-	hashTablePool.Put(hash_table)
+	ht := hashTablePool.Get().(*hashTable)
+	result := lzsCompressCore(dst, dstlen, src, srclen, ht)
+	hashTablePool.Put(ht)
 	return result
 }
 
-func lzsCompressCore(dst *uint8, dstlen int32, src *uint8, srclen int32, hash_table *[htSize]uint16) int32 {
+func lzsCompressCore(dst *uint8, dstlen int32, src *uint8, srclen int32, ht *hashTable) int32 {
 	var length int32
 	var offset int32
 	var inpos int32 = 0
@@ -69,8 +75,17 @@ func lzsCompressCore(dst *uint8, dstlen int32, src *uint8, srclen int32, hash_ta
 	var hash_chain [2048]uint16
 	var vv int32
 
-	// Bitmap for lazy hash table initialization (1KB vs 128KB copy)
-	var valid_bitmap [htSize >> 6]uint64
+	table := &ht.entries
+	entries := table[:]
+	gen := (ht.generation + 1) & 0xFFFF
+	if gen == 0 {
+		for i := range entries {
+			entries[i] = 0
+		}
+		gen = 1
+	}
+	ht.generation = gen
+	currentGen := gen
 
 	// Pre-calculate pointer base addresses
 	srcPtr := uintptr(unsafe.Pointer(src))
@@ -82,18 +97,15 @@ func lzsCompressCore(dst *uint8, dstlen int32, src *uint8, srclen int32, hash_ta
 
 	for inpos < srclen-2 {
 		hash = *(*uint16)(unsafe.Pointer((*uint8)(unsafe.Pointer(srcPtr + uintptr(inpos)))))
-
-		// Check if hash slot is initialized via bitmap
-		bit_idx := hash >> 6
-		bit_pos := hash & 63
+		idx := int(hash)
+		entry := entries[idx]
 		hofs = 65535
-		if (valid_bitmap[bit_idx] & (1 << bit_pos)) != 0 {
-			hofs = hash_table[hash]
+		if entry>>16 == currentGen {
+			hofs = uint16(entry)
 		}
 
 		hash_chain[inpos&2047] = hofs
-		hash_table[hash] = uint16(inpos)
-		valid_bitmap[bit_idx] |= (1 << bit_pos)
+		entries[idx] = (currentGen << 16) | uint32(uint16(inpos))
 
 		// Literal encoding (no match found or out of window)
 		if int32(hofs)+2048 <= inpos || int32(hofs) == 65535 {
@@ -309,17 +321,15 @@ func lzsCompressCore(dst *uint8, dstlen int32, src *uint8, srclen int32, hash_ta
 		longest_match_len--
 		for longest_match_len != 0 {
 			hash = *(*uint16)(unsafe.Pointer((*uint8)(unsafe.Pointer(srcPtr + uintptr(inpos)))))
-
-			bit_idx := hash >> 6
-			bit_pos := hash & 63
+			idx := int(hash)
 			hofs_tmp := uint16(65535)
-			if (valid_bitmap[bit_idx] & (1 << bit_pos)) != 0 {
-				hofs_tmp = hash_table[hash]
+			entry := entries[idx]
+			if entry>>16 == currentGen {
+				hofs_tmp = uint16(entry)
 			}
 			hash_chain[inpos&2047] = hofs_tmp
 
-			hash_table[hash] = uint16(inpos)
-			valid_bitmap[bit_idx] |= (1 << bit_pos)
+			entries[idx] = (currentGen << 16) | uint32(uint16(inpos))
 
 			inpos++
 			longest_match_len--
@@ -329,13 +339,13 @@ func lzsCompressCore(dst *uint8, dstlen int32, src *uint8, srclen int32, hash_ta
 	// Handle remaining 1-2 bytes
 	if inpos == srclen-2 {
 		hash = *(*uint16)(unsafe.Pointer((*uint8)(unsafe.Pointer(srcPtr + uintptr(inpos)))))
-
-		bit_idx := hash >> 6
-		bit_pos := hash & 63
+		idx := int(hash)
 		hofs = 65535
-		if (valid_bitmap[bit_idx] & (1 << bit_pos)) != 0 {
-			hofs = hash_table[hash]
+		entry := entries[idx]
+		if entry>>16 == currentGen {
+			hofs = uint16(entry)
 		}
+		entries[idx] = (currentGen << 16) | uint32(uint16(inpos))
 		if int32(hofs) != 65535 && int32(hofs)+2048 > inpos {
 			offset = inpos - int32(hofs)
 			if offset < 128 {
@@ -503,7 +513,6 @@ func lzsCompressCore(dst *uint8, dstlen int32, src *uint8, srclen int32, hash_ta
 
 func lzsDecompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 	var outlen int32 = 0
-	var bits_left int32 = 8
 	var data uint32
 	var offset uint16
 	var length uint16
@@ -512,30 +521,26 @@ func lzsDecompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 	srcPtr := uintptr(unsafe.Pointer(src))
 	dstPtr := uintptr(unsafe.Pointer(dst))
 
+	// Bit reading optimization - read multiple bytes ahead
+	var bitBuf uint32 = 0
+	var bitCount int32 = 0
+
 	for {
-		// Read 9-bit literal or offset marker
-		{
-			if srclen < 2 {
-				return -EINVAL
-			}
-			if 9 >= bits_left {
-				data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))<<(9-bits_left)) & 511
-				srcPtr++
-				srclen--
-				bits_left += -1
-				if bits_left < 8 {
-					data |= uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr))) >> bits_left)
-					if !(bits_left != 0) {
-						bits_left = 8
-						srcPtr++
-						srclen--
-					}
-				}
-			} else {
-				data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))>>(bits_left-9)) & 511
-				bits_left -= 9
-			}
+		// Ensure we have at least 9 bits available
+		for bitCount < 9 && srclen > 0 {
+			bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
+			srcPtr++
+			srclen--
+			bitCount += 8
 		}
+		if bitCount < 9 {
+			return -EINVAL
+		}
+
+		// Read 9-bit literal or offset marker
+		bitCount -= 9
+		data = (bitBuf >> bitCount) & 511
+
 		for data < uint32(256) {
 			if outlen == dstlen {
 				return -EFBIG
@@ -544,111 +549,84 @@ func lzsDecompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 			*(*uint8)(unsafe.Pointer(dstPtr + uintptr(outlen))) = uint8(data)
 			outlen++
 
-			{
-				if srclen < 2 {
-					return -EINVAL
-				}
-				if 9 >= bits_left {
-					data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))<<(9-bits_left)) & 511
-					srcPtr++
-					srclen--
-					bits_left += -1
-					if bits_left < 8 {
-						data |= uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr))) >> bits_left)
-						if !(bits_left != 0) {
-							bits_left = 8
-							srcPtr++
-							srclen--
-						}
-					}
-				} else {
-					data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))>>(bits_left-9)) & 511
-					bits_left -= 9
-				}
+			// Read next 9 bits
+			for bitCount < 9 && srclen > 0 {
+				bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
+				srcPtr++
+				srclen--
+				bitCount += 8
 			}
+			if bitCount < 9 {
+				return -EINVAL
+			}
+			bitCount -= 9
+			data = (bitBuf >> bitCount) & 511
 		}
 		if data == 384 {
 			return outlen
 		}
 		offset = uint16(data & 127)
 		if data < 384 {
-			{
-				if srclen < 2 {
-					return -EINVAL
-				}
-				if 4 >= bits_left {
-					data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))<<(4-bits_left)) & 15
-					srcPtr++
-					srclen--
-					bits_left += 4
-					if bits_left < 8 {
-						data |= uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr))) >> bits_left)
-					}
-				} else {
-					data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))>>(bits_left-4)) & 15
-					bits_left -= 4
-				}
-			}
-			offset <<= 4
-			offset |= uint16(data)
-		}
-		{
-			if srclen < 2 {
-				return -EINVAL
-			}
-			if 2 >= bits_left {
-				data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))<<(2-bits_left)) & 3
+			// Read 4 more bits for extended offset
+			for bitCount < 4 && srclen > 0 {
+				bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
 				srcPtr++
 				srclen--
-				bits_left += 6
-				if bits_left < 8 {
-					data |= uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr))) >> bits_left)
-				}
-			} else {
-				data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))>>(bits_left-2)) & 3
-				bits_left -= 2
+				bitCount += 8
 			}
+			if bitCount < 4 {
+				return -EINVAL
+			}
+			bitCount -= 4
+			offset <<= 4
+			offset |= uint16((bitBuf >> bitCount) & 15)
 		}
+
+		// Read 2 bits for length code
+		for bitCount < 2 && srclen > 0 {
+			bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
+			srcPtr++
+			srclen--
+			bitCount += 8
+		}
+		if bitCount < 2 {
+			return -EINVAL
+		}
+		bitCount -= 2
+		data = (bitBuf >> bitCount) & 3
+
 		if data != 3 {
 			length = uint16(data + 2)
 		} else {
-			{
-				if srclen < 2 {
-					return -EINVAL
-				}
-				if 2 >= bits_left {
-					data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))<<(2-bits_left)) & 3
-					srcPtr++
-					srclen--
-					bits_left += 6
-					if bits_left < 8 {
-						data |= uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr))) >> bits_left)
-					}
-				} else {
-					data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))>>(bits_left-2)) & 3
-					bits_left -= 2
-				}
+			// Read another 2 bits
+			for bitCount < 2 && srclen > 0 {
+				bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
+				srcPtr++
+				srclen--
+				bitCount += 8
 			}
+			if bitCount < 2 {
+				return -EINVAL
+			}
+			bitCount -= 2
+			data = (bitBuf >> bitCount) & 3
+
 			if data != 3 {
 				length = uint16(data + 5)
 			} else {
 				length = uint16(8)
 				for {
-					if srclen < 2 {
-						return -EINVAL
-					}
-					if 4 >= bits_left {
-						data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))<<(4-bits_left)) & 15
+					for bitCount < 4 && srclen > 0 {
+						bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
 						srcPtr++
 						srclen--
-						bits_left += 4
-						if bits_left < 8 {
-							data |= uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr))) >> bits_left)
-						}
-					} else {
-						data = uint32(int32(*(*uint8)(unsafe.Pointer(srcPtr)))>>(bits_left-4)) & 15
-						bits_left -= 4
+						bitCount += 8
 					}
+					if bitCount < 4 {
+						return -EINVAL
+					}
+					bitCount -= 4
+					data = (bitBuf >> bitCount) & 15
 
 					if data != 15 {
 						length += uint16(data)
@@ -665,27 +643,89 @@ func lzsDecompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 			return -EFBIG
 		}
 
-		// Copy matched data - handle overlapping case byte by byte
+		// Copy matched data
 		copyOffset := outlen - int32(offset)
-		for length != 0 {
-			*(*uint8)(unsafe.Pointer(dstPtr + uintptr(outlen))) = *(*uint8)(unsafe.Pointer(dstPtr + uintptr(copyOffset)))
-			outlen++
-			copyOffset++
-			length--
+		copyLen := int32(length)
+
+		// Optimization: batch copy when offset >= length (non-overlapping)
+		if int32(offset) >= copyLen {
+			// Use word-aligned copies for better performance
+			srcPos := dstPtr + uintptr(copyOffset)
+			dstPos := dstPtr + uintptr(outlen)
+
+			// Copy 8 bytes at a time
+			for copyLen >= 8 {
+				*(*uint64)(unsafe.Pointer(dstPos)) = *(*uint64)(unsafe.Pointer(srcPos))
+				srcPos += 8
+				dstPos += 8
+				copyLen -= 8
+			}
+			// Copy 4 bytes if possible
+			if copyLen >= 4 {
+				*(*uint32)(unsafe.Pointer(dstPos)) = *(*uint32)(unsafe.Pointer(srcPos))
+				srcPos += 4
+				dstPos += 4
+				copyLen -= 4
+			}
+			// Copy remaining bytes
+			for copyLen > 0 {
+				*(*uint8)(unsafe.Pointer(dstPos)) = *(*uint8)(unsafe.Pointer(srcPos))
+				srcPos++
+				dstPos++
+				copyLen--
+			}
+			outlen += int32(length)
+		} else {
+			// Overlapping copy - must go byte by byte for RLE patterns
+			for length != 0 {
+				*(*uint8)(unsafe.Pointer(dstPtr + uintptr(outlen))) = *(*uint8)(unsafe.Pointer(dstPtr + uintptr(copyOffset)))
+				outlen++
+				copyOffset++
+				length--
+			}
 		}
 	}
 	return -EINVAL
 }
 
 func memcmp(s1, s2 unsafe.Pointer, n uintptr) int {
-	p1 := (*[1 << 30]byte)(s1)[:n:n]
-	p2 := (*[1 << 30]byte)(s2)[:n:n]
-	for i := 0; i < len(p1); i++ {
-		if p1[i] < p2[i] {
-			return -1
-		} else if p1[i] > p2[i] {
+	if n == 0 {
+		return 0
+	}
+
+	ptr1 := uintptr(s1)
+	ptr2 := uintptr(s2)
+
+	for n >= 8 {
+		v1 := *(*uint64)(unsafe.Pointer(ptr1))
+		v2 := *(*uint64)(unsafe.Pointer(ptr2))
+		if v1 != v2 {
+			diff := v1 ^ v2
+			shift := uint(bits.TrailingZeros64(diff) &^ 7)
+			b1 := byte(v1 >> shift)
+			b2 := byte(v2 >> shift)
+			if b1 < b2 {
+				return -1
+			}
 			return 1
 		}
+		ptr1 += 8
+		ptr2 += 8
+		n -= 8
 	}
+
+	for n > 0 {
+		b1 := *(*uint8)(unsafe.Pointer(ptr1))
+		b2 := *(*uint8)(unsafe.Pointer(ptr2))
+		if b1 < b2 {
+			return -1
+		} else if b1 > b2 {
+			return 1
+		}
+		ptr1++
+		ptr2++
+		n--
+	}
+
 	return 0
 }
