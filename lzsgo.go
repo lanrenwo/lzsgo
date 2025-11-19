@@ -39,21 +39,6 @@ func Uncompress(src []byte, dst []byte) (int, error) {
 	return n, parseErr(n)
 }
 
-func parseErr(n int) error {
-	switch {
-	case n > 0:
-		return nil
-	case n == -EFBIG:
-		return errors.New(ErrEFBIG)
-	case n == -EINVAL:
-		return errors.New(ErrEINVAL)
-	case n == 0:
-		return errors.New(ErrZero)
-	default:
-		return errors.New(ErrUnknown)
-	}
-}
-
 func lzsCompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 	ht := hashTablePool.Get().(*hashTable)
 	result := lzsCompressCore(dst, dstlen, src, srclen, ht)
@@ -522,26 +507,37 @@ func lzsDecompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 	dstPtr := uintptr(unsafe.Pointer(dst))
 
 	// Bit reading optimization - read multiple bytes ahead
-	var bitBuf uint32 = 0
-	var bitCount int32 = 0
+	var bitBuf uint64 = 0
+	var bitCount uint32 = 0
+	var inpos int32 = 0
 
 	for {
 		// Ensure we have at least 9 bits available
-		for bitCount < 9 && srclen > 0 {
-			bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
-			srcPtr++
-			srclen--
-			bitCount += 8
-		}
 		if bitCount < 9 {
-			return -EINVAL
+			if inpos+8 <= srclen {
+				// Fast path: read 32 bits at once
+				val32 := *(*uint32)(unsafe.Pointer(srcPtr + uintptr(inpos)))
+				val32 = bits.ReverseBytes32(val32)
+				bitBuf = (bitBuf << 32) | uint64(val32)
+				bitCount += 32
+				inpos += 4
+			} else {
+				for bitCount < 9 && inpos < srclen {
+					bitBuf = (bitBuf << 8) | uint64(*(*uint8)(unsafe.Pointer(srcPtr + uintptr(inpos))))
+					inpos++
+					bitCount += 8
+				}
+				if bitCount < 9 {
+					return -EINVAL
+				}
+			}
 		}
 
 		// Read 9-bit literal or offset marker
+		data = uint32((bitBuf >> (bitCount - 9)) & 511)
 		bitCount -= 9
-		data = (bitBuf >> bitCount) & 511
 
-		for data < uint32(256) {
+		for data < 256 {
 			if outlen == dstlen {
 				return -EFBIG
 			}
@@ -550,17 +546,26 @@ func lzsDecompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 			outlen++
 
 			// Read next 9 bits
-			for bitCount < 9 && srclen > 0 {
-				bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
-				srcPtr++
-				srclen--
-				bitCount += 8
-			}
 			if bitCount < 9 {
-				return -EINVAL
+				if inpos+8 <= srclen {
+					val32 := *(*uint32)(unsafe.Pointer(srcPtr + uintptr(inpos)))
+					val32 = bits.ReverseBytes32(val32)
+					bitBuf = (bitBuf << 32) | uint64(val32)
+					bitCount += 32
+					inpos += 4
+				} else {
+					for bitCount < 9 && inpos < srclen {
+						bitBuf = (bitBuf << 8) | uint64(*(*uint8)(unsafe.Pointer(srcPtr + uintptr(inpos))))
+						inpos++
+						bitCount += 8
+					}
+					if bitCount < 9 {
+						return -EINVAL
+					}
+				}
 			}
+			data = uint32((bitBuf >> (bitCount - 9)) & 511)
 			bitCount -= 9
-			data = (bitBuf >> bitCount) & 511
 		}
 		if data == 384 {
 			return outlen
@@ -568,65 +573,100 @@ func lzsDecompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 		offset = uint16(data & 127)
 		if data < 384 {
 			// Read 4 more bits for extended offset
-			for bitCount < 4 && srclen > 0 {
-				bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
-				srcPtr++
-				srclen--
-				bitCount += 8
-			}
 			if bitCount < 4 {
-				return -EINVAL
+				if inpos+8 <= srclen {
+					val32 := *(*uint32)(unsafe.Pointer(srcPtr + uintptr(inpos)))
+					val32 = bits.ReverseBytes32(val32)
+					bitBuf = (bitBuf << 32) | uint64(val32)
+					bitCount += 32
+					inpos += 4
+				} else {
+					for bitCount < 4 && inpos < srclen {
+						bitBuf = (bitBuf << 8) | uint64(*(*uint8)(unsafe.Pointer(srcPtr + uintptr(inpos))))
+						inpos++
+						bitCount += 8
+					}
+					if bitCount < 4 {
+						return -EINVAL
+					}
+				}
 			}
+			offset = (offset << 4) | uint16((bitBuf>>(bitCount-4))&15)
 			bitCount -= 4
-			offset <<= 4
-			offset |= uint16((bitBuf >> bitCount) & 15)
 		}
 
 		// Read 2 bits for length code
-		for bitCount < 2 && srclen > 0 {
-			bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
-			srcPtr++
-			srclen--
-			bitCount += 8
-		}
 		if bitCount < 2 {
-			return -EINVAL
+			if inpos+8 <= srclen {
+				val32 := *(*uint32)(unsafe.Pointer(srcPtr + uintptr(inpos)))
+				val32 = bits.ReverseBytes32(val32)
+				bitBuf = (bitBuf << 32) | uint64(val32)
+				bitCount += 32
+				inpos += 4
+			} else {
+				for bitCount < 2 && inpos < srclen {
+					bitBuf = (bitBuf << 8) | uint64(*(*uint8)(unsafe.Pointer(srcPtr + uintptr(inpos))))
+					inpos++
+					bitCount += 8
+				}
+				if bitCount < 2 {
+					return -EINVAL
+				}
+			}
 		}
+		data = uint32((bitBuf >> (bitCount - 2)) & 3)
 		bitCount -= 2
-		data = (bitBuf >> bitCount) & 3
 
 		if data != 3 {
 			length = uint16(data + 2)
 		} else {
 			// Read another 2 bits
-			for bitCount < 2 && srclen > 0 {
-				bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
-				srcPtr++
-				srclen--
-				bitCount += 8
-			}
 			if bitCount < 2 {
-				return -EINVAL
+				if inpos+8 <= srclen {
+					val32 := *(*uint32)(unsafe.Pointer(srcPtr + uintptr(inpos)))
+					val32 = bits.ReverseBytes32(val32)
+					bitBuf = (bitBuf << 32) | uint64(val32)
+					bitCount += 32
+					inpos += 4
+				} else {
+					for bitCount < 2 && inpos < srclen {
+						bitBuf = (bitBuf << 8) | uint64(*(*uint8)(unsafe.Pointer(srcPtr + uintptr(inpos))))
+						inpos++
+						bitCount += 8
+					}
+					if bitCount < 2 {
+						return -EINVAL
+					}
+				}
 			}
+			data = uint32((bitBuf >> (bitCount - 2)) & 3)
 			bitCount -= 2
-			data = (bitBuf >> bitCount) & 3
 
 			if data != 3 {
 				length = uint16(data + 5)
 			} else {
 				length = uint16(8)
 				for {
-					for bitCount < 4 && srclen > 0 {
-						bitBuf = (bitBuf << 8) | uint32(*(*uint8)(unsafe.Pointer(srcPtr)))
-						srcPtr++
-						srclen--
-						bitCount += 8
-					}
 					if bitCount < 4 {
-						return -EINVAL
+						if inpos+8 <= srclen {
+							val32 := *(*uint32)(unsafe.Pointer(srcPtr + uintptr(inpos)))
+							val32 = bits.ReverseBytes32(val32)
+							bitBuf = (bitBuf << 32) | uint64(val32)
+							bitCount += 32
+							inpos += 4
+						} else {
+							for bitCount < 4 && inpos < srclen {
+								bitBuf = (bitBuf << 8) | uint64(*(*uint8)(unsafe.Pointer(srcPtr + uintptr(inpos))))
+								inpos++
+								bitCount += 8
+							}
+							if bitCount < 4 {
+								return -EINVAL
+							}
+						}
 					}
+					data = uint32((bitBuf >> (bitCount - 4)) & 15)
 					bitCount -= 4
-					data = (bitBuf >> bitCount) & 15
 
 					if data != 15 {
 						length += uint16(data)
@@ -685,7 +725,21 @@ func lzsDecompress(dst *uint8, dstlen int32, src *uint8, srclen int32) int32 {
 			}
 		}
 	}
-	return -EINVAL
+}
+
+func parseErr(n int) error {
+	switch {
+	case n > 0:
+		return nil
+	case n == -EFBIG:
+		return errors.New(ErrEFBIG)
+	case n == -EINVAL:
+		return errors.New(ErrEINVAL)
+	case n == 0:
+		return errors.New(ErrZero)
+	default:
+		return errors.New(ErrUnknown)
+	}
 }
 
 func memcmp(s1, s2 unsafe.Pointer, n uintptr) int {
